@@ -1,19 +1,16 @@
 {
-  "version": 2,
-  "routes": [
+  "headers": [
     {
-      "src": "/assets/(.*)",
-      "headers": {
-        "Cache-Control": "public, max-age=86400, immutable"
-      },
-      "dest": "/assets/$1"
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400, immutable" }
+      ]
     },
     {
-      "src": "/(.*)",
-      "headers": {
-        "Cache-Control": "public, max-age=3600"
-      },
-      "dest": "/$1"
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=3600" }
+      ]
     }
   ]
 }

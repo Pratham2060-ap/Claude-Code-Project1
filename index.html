@@ -894,6 +894,21 @@ a{color:inherit;text-decoration:none}
   .modal-card{margin:8px;padding:20px}
   .data-table{display:block;overflow-x:auto}
 }
+/* ── Backup reminder banner ── */
+.backup-banner{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:600;display:flex;align-items:center;gap:14px;width:max-content;max-width:min(720px,calc(100vw - 24px));padding:12px 18px;border-radius:14px;background:rgba(35,24,4,.94);border:1px solid rgba(245,158,11,.5);box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 1px rgba(245,158,11,.12);backdrop-filter:blur(10px);animation:backupBannerIn .45s var(--ease-smooth)}
+[data-theme="light"] .backup-banner{background:rgba(255,251,235,.97);border-color:#f59e0b;box-shadow:0 8px 28px rgba(180,120,10,.25)}
+.backup-banner-icon{font-size:20px;flex-shrink:0}
+.backup-banner-text{font-size:13px;line-height:1.45;color:#fde68a}
+[data-theme="light"] .backup-banner-text{color:#92400e}
+.backup-banner-text strong{color:#fbbf24}
+[data-theme="light"] .backup-banner-text strong{color:#b45309}
+.backup-banner-btn{flex-shrink:0;padding:8px 16px;border-radius:10px;border:none;background:#f59e0b;color:#1c1305;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;transition:filter .2s}
+.backup-banner-btn:hover{filter:brightness(1.12)}
+.backup-banner-close{flex-shrink:0;width:28px;height:28px;display:grid;place-items:center;border-radius:8px;border:none;background:transparent;color:#fde68a;font-size:14px;cursor:pointer;opacity:.7;transition:opacity .2s}
+[data-theme="light"] .backup-banner-close{color:#92400e}
+.backup-banner-close:hover{opacity:1}
+@keyframes backupBannerIn{from{opacity:0;transform:translate(-50%,-16px)}to{opacity:1;transform:translate(-50%,0)}}
+@media(max-width:600px){.backup-banner{flex-wrap:wrap;top:auto;bottom:12px;animation:none}}
 </style>
 </head>
 <body>
@@ -1722,8 +1737,23 @@ const Sidebar = ({ activeModule, onModuleChange, collapsed, onToggleCollapse, mo
   );
 };
 
-const SettingsModal = ({ onClose, currency, onCurrencyChange, theme, onThemeToggle }) => (
+const SettingsModal = ({ onClose, currency, onCurrencyChange, theme, onThemeToggle, onExport, onImport, lastBackup }) => (
   <Modal title="Settings" onClose={onClose} width="520px">
+    <FormGroup label="Backup & Restore">
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <button className="backup-banner-btn" onClick={onExport}>⬇ Export Data (JSON)</button>
+        <label className="btn btn-ghost" style={{ cursor: 'pointer', margin: 0 }}>
+          ⬆ Import Backup
+          <input type="file" accept=".json,application/json" style={{ display: 'none' }}
+            onChange={e => { const f = e.target.files[0]; if (f) onImport(f); e.target.value = ''; }}/>
+        </label>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8 }}>
+        {lastBackup
+          ? `Last export: ${new Date(lastBackup).toLocaleString()}`
+          : 'Never exported — your data lives only in this browser and will be erased if browsing data is cleared.'}
+      </div>
+    </FormGroup>
     <FormGroup label="Default Currency">
       <select className="form-select" value={currency}
         onChange={e => onCurrencyChange(e.target.value)}>
@@ -3732,6 +3762,35 @@ function loadData() {
 }
 function saveData(data) { try { localStorage.setItem('orbit-desk-data-v2', JSON.stringify(data)); } catch(e) {} }
 
+/* ── Backup: export data as a downloadable JSON file, restore from one ── */
+function downloadBackup(data) {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const payload = { app: 'orbit-desk', version: 2, exportedAt: new Date().toISOString(), data };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `orbit-desk-backup-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function parseBackup(text) {
+  const parsed = JSON.parse(text);
+  const data = parsed && parsed.app === 'orbit-desk' ? parsed.data : parsed;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.income)) throw new Error('not a valid Orbit Desk backup file');
+  return { ...INITIAL_DATA, ...data };
+}
+
+const BackupBanner = ({ changes, onExport, onSnooze }) => (
+  <div className="backup-banner" role="alert">
+    <span className="backup-banner-icon">⚠️</span>
+    <div className="backup-banner-text">
+      <strong>Back up your data.</strong> {changes} unsaved change{changes === 1 ? '' : 's'} live only in this browser — clearing browsing data will erase them permanently.
+    </div>
+    <button className="backup-banner-btn" onClick={onExport}>Export now</button>
+    <button className="backup-banner-close" onClick={onSnooze} title="Remind me tomorrow">✕</button>
+  </div>
+);
+
 const OrbitApp = () => {
   const [activeModule, setActiveModule] = React.useState(() => localStorage.getItem('orbit-module') || 'command');
   const [collapsed, setCollapsed] = React.useState(false);
@@ -3743,8 +3802,59 @@ const OrbitApp = () => {
 
   React.useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('orbit-theme', theme); }, [theme]);
   const toggleTheme = React.useCallback((t) => { setTheme(t || (theme === 'dark' ? 'light' : 'dark')); }, [theme]);
-  React.useEffect(() => { saveData(data); }, [data]);
   React.useEffect(() => { localStorage.setItem('orbit-module', activeModule); }, [activeModule]);
+
+  /* ── Backup tracking: count changes since last export, nudge before they can be lost ── */
+  const [lastBackup, setLastBackup] = React.useState(() => Number(localStorage.getItem('orbit-last-backup')) || 0);
+  const [backupChanges, setBackupChanges] = React.useState(() => Number(localStorage.getItem('orbit-backup-changes')) || 0);
+  const [backupSnooze, setBackupSnooze] = React.useState(() => Number(localStorage.getItem('orbit-backup-snooze')) || 0);
+  const skipFirstSave = React.useRef(true);
+  const skipNextCount = React.useRef(false);
+
+  React.useEffect(() => {
+    saveData(data);
+    if (skipFirstSave.current) { skipFirstSave.current = false; return; }
+    if (skipNextCount.current) { skipNextCount.current = false; return; }
+    setBackupChanges(c => { const n = c + 1; try { localStorage.setItem('orbit-backup-changes', String(n)); } catch(e) {} return n; });
+  }, [data]);
+
+  const handleExport = React.useCallback(() => {
+    downloadBackup(data);
+    const now = Date.now();
+    setLastBackup(now); setBackupChanges(0);
+    try { localStorage.setItem('orbit-last-backup', String(now)); localStorage.setItem('orbit-backup-changes', '0'); } catch(e) {}
+  }, [data]);
+
+  const handleImport = React.useCallback((file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const restored = parseBackup(reader.result);
+        skipNextCount.current = true;
+        setData(restored);
+        setBackupChanges(0);
+        try { localStorage.setItem('orbit-backup-changes', '0'); } catch(e) {}
+        setShowSettings(false);
+      } catch (e) { window.alert('Import failed: ' + e.message); }
+    };
+    reader.readAsText(file);
+  }, []);
+
+  const snoozeBackupBanner = React.useCallback(() => {
+    const until = Date.now() + 24 * 3600 * 1000;
+    setBackupSnooze(until);
+    try { localStorage.setItem('orbit-backup-snooze', String(until)); } catch(e) {}
+  }, []);
+
+  /* Warn on tab close while changes exist that were never exported to a file */
+  React.useEffect(() => {
+    const warn = (e) => { if (backupChanges > 0 && !lastBackup) { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [backupChanges, lastBackup]);
+
+  const backupDue = backupChanges > 0 && (!lastBackup || Date.now() - lastBackup > 7 * 864e5);
+  const showBackupBanner = backupDue && Date.now() > backupSnooze;
 
   const onUpdate = React.useCallback((key, value) => { setData(prev => ({ ...prev, [key]: value })); }, []);
   const handleModuleChange = React.useCallback((id) => { if (id === 'settings') { setShowSettings(true); return; } setActiveModule(id); }, []);
@@ -3773,6 +3883,7 @@ const OrbitApp = () => {
         <div key={modId} className={`celestial ${cls} ${activeModule === modId ? 'active' : ''}`}/>
       ))}
       <div className="orbit-bg"><div className="grid-overlay"/><div className="orbit-ring orbit-ring-1"/><div className="orbit-ring orbit-ring-2"/><div className="orbit-ring orbit-ring-3"/><div className="orbit-dot" style={{ top: '15%', left: '45%' }}/><div className="orbit-dot" style={{ top: '60%', left: '70%' }}/><div className="orbit-dot" style={{ top: '80%', left: '35%' }}/><div className="orbit-dot" style={{ top: '30%', left: '85%' }}/></div>
+      {showBackupBanner && <BackupBanner changes={backupChanges} onExport={handleExport} onSnooze={snoozeBackupBanner}/>}
       <button className="mobile-menu-btn" onClick={() => setMobileOpen(true)}><OrbitIcons.menu size={24}/></button>
       <Sidebar activeModule={activeModule} onModuleChange={handleModuleChange} collapsed={collapsed} onToggleCollapse={() => setCollapsed(c => !c)} mobileOpen={mobileOpen} onCloseMobile={() => setMobileOpen(false)} theme={theme} onThemeToggle={toggleTheme}/>
       <main className="content-area" key={activeModule}>
@@ -3786,7 +3897,7 @@ const OrbitApp = () => {
         }/>
         {renderModule()}
       </main>
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} currency={currency} theme={theme} onThemeToggle={toggleTheme} onCurrencyChange={setCurrency}/>}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} currency={currency} theme={theme} onThemeToggle={toggleTheme} onCurrencyChange={setCurrency} onExport={handleExport} onImport={handleImport} lastBackup={lastBackup}/>}
     </>
   );
 };
@@ -3799,6 +3910,9 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
+}
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persist().catch(() => {});
 }
 </script>
 </body>

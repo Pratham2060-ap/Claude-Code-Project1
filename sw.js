@@ -1,4 +1,4 @@
-const CACHE = 'orbit-desk-v2';
+const CACHE = 'orbit-desk-v3';
 
 self.addEventListener('install', e => {
   e.waitUntil(
